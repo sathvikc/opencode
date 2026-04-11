@@ -46,7 +46,7 @@ import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Layer, Option, Scope, ServiceMap } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
-import { TaskTool } from "@/tool/task"
+import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 
 // @ts-ignore
@@ -99,6 +99,7 @@ export namespace SessionPrompt {
       const scope = yield* Scope.Scope
       const instruction = yield* Instruction.Service
       const state = yield* SessionRunState.Service
+      const revert = yield* SessionRevert.Service
 
       const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
         log.info("cancel", { sessionID })
@@ -355,7 +356,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           abort: options.abortSignal!,
           messageID: input.processor.message.id,
           callID: options.toolCallId,
-          extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
+          extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps },
           agent: input.agent.name,
           messages: input.messages,
           metadata: (val) =>
@@ -585,7 +586,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               sessionID,
               abort: signal,
               callID: part.callID,
-              extra: { bypassAgentCheck: true },
+              extra: { bypassAgentCheck: true, promptOps },
               messages: msgs,
               metadata(val: { title?: string; metadata?: Record<string, any> }) {
                 return Effect.runPromise(
@@ -708,7 +709,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const ctx = yield* InstanceState.context
         const session = yield* sessions.get(input.sessionID)
         if (session.revert) {
-          yield* Effect.promise(() => SessionRevert.cleanup(session))
+          yield* revert.cleanup(session)
         }
         const agent = yield* agents.get(input.agent)
         if (!agent) {
@@ -1269,7 +1270,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
         function* (input: PromptInput) {
           const session = yield* sessions.get(input.sessionID)
-          yield* Effect.promise(() => SessionRevert.cleanup(session))
+          yield* revert.cleanup(session)
           const message = yield* createUserMessage(input)
           yield* sessions.touch(input.sessionID)
 
@@ -1654,6 +1655,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return result
       })
 
+      const promptOps: TaskPromptOps = {
+        cancel: (sessionID) => Effect.runFork(cancel(sessionID)),
+        resolvePromptParts: (template) => Effect.runPromise(resolvePromptParts(template)),
+        prompt: (input) => Effect.runPromise(prompt(input)),
+      }
+
       return Service.of({
         cancel,
         prompt,
@@ -1665,29 +1672,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }),
   )
 
-  const defaultLayer = Layer.unwrap(
-    Effect.sync(() =>
-      layer.pipe(
-        Layer.provide(SessionRunState.layer),
-        Layer.provide(SessionStatus.layer),
-        Layer.provide(SessionCompaction.defaultLayer),
-        Layer.provide(SessionProcessor.defaultLayer),
-        Layer.provide(Command.defaultLayer),
-        Layer.provide(Permission.defaultLayer),
-        Layer.provide(MCP.defaultLayer),
-        Layer.provide(LSP.defaultLayer),
-        Layer.provide(FileTime.defaultLayer),
-        Layer.provide(ToolRegistry.defaultLayer),
-        Layer.provide(Truncate.layer),
-        Layer.provide(Provider.defaultLayer),
-        Layer.provide(Instruction.defaultLayer),
-        Layer.provide(AppFileSystem.defaultLayer),
-        Layer.provide(Plugin.defaultLayer),
-        Layer.provide(Session.defaultLayer),
-        Layer.provide(Agent.defaultLayer),
-        Layer.provide(Bus.layer),
-        Layer.provide(CrossSpawnSpawner.defaultLayer),
-      ),
+  export const defaultLayer = Layer.suspend(() =>
+    layer.pipe(
+      Layer.provide(SessionRunState.defaultLayer),
+      Layer.provide(SessionStatus.defaultLayer),
+      Layer.provide(SessionCompaction.defaultLayer),
+      Layer.provide(SessionProcessor.defaultLayer),
+      Layer.provide(Command.defaultLayer),
+      Layer.provide(Permission.defaultLayer),
+      Layer.provide(MCP.defaultLayer),
+      Layer.provide(LSP.defaultLayer),
+      Layer.provide(FileTime.defaultLayer),
+      Layer.provide(ToolRegistry.defaultLayer),
+      Layer.provide(Truncate.defaultLayer),
+      Layer.provide(Provider.defaultLayer),
+      Layer.provide(Instruction.defaultLayer),
+      Layer.provide(AppFileSystem.defaultLayer),
+      Layer.provide(Plugin.defaultLayer),
+      Layer.provide(Session.defaultLayer),
+      Layer.provide(SessionRevert.defaultLayer),
+      Layer.provide(Agent.defaultLayer),
+      Layer.provide(Bus.layer),
+      Layer.provide(CrossSpawnSpawner.defaultLayer),
     ),
   )
   const { runPromise } = makeRuntime(Service, defaultLayer)
